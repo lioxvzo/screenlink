@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data:; media-src 'self' blob: mediastream:; connect-src 'self' https://*.peerjs.com wss://*.peerjs.com; style-src 'self' 'unsafe-inline'">
+  <title>ScreenLink</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">ScreenLink</div>
+
+    <div class="mycode">
+      <span class="label">Dein Code</span>
+      <span id="myCode" class="code">······</span>
+      <button id="copyBtn" class="ghost" title="Code kopieren">Kopieren</button>
+    </div>
+
+    <div class="connect" id="connectBox">
+      <input id="remoteCode" maxlength="6" placeholder="Code vom Kollegen" spellcheck="false" autocomplete="off">
+      <button id="connectBtn" class="primary">Verbinden</button>
+    </div>
+
+    <div class="connected hidden" id="connectedBox">
+      <span class="dot"></span>
+      <span>Verbunden mit <b id="remoteName">?</b></span>
+      <button id="disconnectBtn" class="ghost">Trennen</button>
+    </div>
+
+    <div class="name">
+      <input id="myName" maxlength="24" placeholder="Dein Name" spellcheck="false">
+    </div>
+  </header>
+
+  <main class="stage" id="stage">
+    <video id="remoteVideo" autoplay playsinline></video>
+    <div class="placeholder" id="placeholder">
+      <div class="big" id="placeholderTitle">Noch nicht verbunden</div>
+      <div class="small" id="placeholderText">Gib den Code deines Kollegen ein oder schick ihm deinen.</div>
+    </div>
+    <div class="stats hidden" id="stats"></div>
+    <div class="preview hidden" id="previewBox">
+      <video id="localVideo" autoplay playsinline muted></video>
+      <span>Du teilst gerade</span>
+    </div>
+  </main>
+
+  <footer class="controls">
+    <button id="shareBtn" class="primary" disabled>Bildschirm teilen</button>
+    <button id="stopBtn" class="danger hidden">Teilen beenden</button>
+
+    <label class="field">Qualität
+      <select id="quality">
+        <option value="720p30">720p · 30 fps</option>
+        <option value="1080p30">1080p · 30 fps</option>
+        <option value="1080p60" selected>1080p · 60 fps</option>
+        <option value="1440p60">1440p · 60 fps</option>
+      </select>
+    </label>
+
+    <label class="field">Modus
+      <select id="mode">
+        <option value="motion" selected>Flüssig (Spiele, Video)</option>
+        <option value="detail">Scharf (Text, Code)</option>
+      </select>
+    </label>
+
+    <label class="check"><input type="checkbox" id="sendAudio" checked> Ton mitsenden</label>
+
+    <div class="spacer"></div>
+
+    <label class="field">Lautstärke
+      <input type="range" id="volume" min="0" max="1" step="0.01" value="1">
+    </label>
+    <button id="statsBtn" class="ghost" title="Verbindungsdaten anzeigen">Info</button>
+    <button id="fullscreenBtn" class="ghost" title="Vollbild (Doppelklick aufs Bild)">Vollbild</button>
+  </footer>
+
+  <div class="modal hidden" id="picker">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Was möchtest du teilen?</h2>
+        <button id="pickerClose" class="ghost">Abbrechen</button>
+      </div>
+      <div class="tabs">
+        <button class="tab active" data-kind="screen">Bildschirme</button>
+        <button class="tab" data-kind="window">Fenster</button>
+      </div>
+      <div class="grid" id="sourceGrid"></div>
+    </div>
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="../node_modules/peerjs/dist/peerjs.min.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

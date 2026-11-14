@@ -1,0 +1,547 @@
+'use strict';
+/* global Peer */
+
+// ---------- Konfiguration ----------
+const ID_PREFIX = 'screenlink-v1-';
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+];
+const QUALITY = {
+  '720p30': { width: 1280, height: 720, fps: 30, bitrate: 4_000_000 },
+  '1080p30': { width: 1920, height: 1080, fps: 30, bitrate: 6_000_000 },
+  '1080p60': { width: 1920, height: 1080, fps: 60, bitrate: 10_000_000 },
+  '1440p60': { width: 2560, height: 1440, fps: 60, bitrate: 16_000_000 },
+};
+
+// ---------- DOM ----------
+const $ = (id) => document.getElementById(id);
+const el = {
+  myCode: $('myCode'), copyBtn: $('copyBtn'), myName: $('myName'),
+  remoteCode: $('remoteCode'), connectBtn: $('connectBtn'),
+  connectBox: $('connectBox'), connectedBox: $('connectedBox'),
+  remoteName: $('remoteName'), disconnectBtn: $('disconnectBtn'),
+  stage: $('stage'), remoteVideo: $('remoteVideo'), localVideo: $('localVideo'),
+  placeholder: $('placeholder'), placeholderTitle: $('placeholderTitle'), placeholderText: $('placeholderText'),
+  previewBox: $('previewBox'), stats: $('stats'),
+  shareBtn: $('shareBtn'), stopBtn: $('stopBtn'), quality: $('quality'), mode: $('mode'),
+  sendAudio: $('sendAudio'), volume: $('volume'), statsBtn: $('statsBtn'), fullscreenBtn: $('fullscreenBtn'),
+  picker: $('picker'), pickerClose: $('pickerClose'), sourceGrid: $('sourceGrid'), toast: $('toast'),
+};
+
+// ---------- Zustand ----------
+let peer = null;
+let myCode = null;
+let conn = null;          // Datenverbindung zum Kollegen
+let remoteLabel = '';
+let outCall = null;       // mein ausgehender Stream
+let inCall = null;        // eingehender Stream vom Kollegen
+let localStream = null;
+let statsVisible = false;
+let opts = {};
+
+const log = (...a) => { console.log(...a); window.api.log(...a); };
+
+function store(key, value) {
+  try { if (value === undefined) return localStorage.getItem(key); localStorage.setItem(key, value); } catch { return null; }
+  return null;
+}
+
+function toast(msg, ms = 2600) {
+  el.toast.textContent = msg;
+  el.toast.classList.remove('hidden');
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => el.toast.classList.add('hidden'), ms);
+}
+
+function randomCode() {
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  return Array.from(bytes, (b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
+}
+const peerIdFor = (code) => ID_PREFIX + code.toLowerCase();
+const codeFromPeerId = (id) => id.slice(ID_PREFIX.length).toUpperCase();
+const myName = () => el.myName.value.trim() || 'Unbekannt';
+
+// ---------- SDP-Feinschliff: H.264 bevorzugen (Hardware-Encoder), Opus in Stereo mit hoher Bitrate ----------
+function preferVideoCodec(sdp, codec) {
+  const lines = sdp.split('\r\n');
+  const m = lines.findIndex((l) => l.startsWith('m=video'));
+  if (m < 0) return sdp;
+  let end = lines.findIndex((l, i) => i > m && l.startsWith('m='));
+  if (end < 0) end = lines.length;
+  const pts = [];
+  for (let i = m + 1; i < end; i++) {
+    const r = lines[i].match(/^a=rtpmap:(\d+) ([\w-]+)\//);
+    if (r && r[2].toUpperCase() === codec) pts.push(r[1]);
+  }
+  if (!pts.length) return sdp;
+  const parts = lines[m].split(' ');
+  lines[m] = [...parts.slice(0, 3), ...pts, ...parts.slice(3).filter((p) => !pts.includes(p))].join(' ');
+  return lines.join('\r\n');
+}
+
+function tuneOpus(sdp) {
+  const r = sdp.match(/a=rtpmap:(\d+) opus\/48000/i);
+  if (!r) return sdp;
+  const pt = r[1];
+  return sdp.replace(new RegExp(`a=fmtp:${pt} ([^\\r\\n]*)`), (line, params) => {
+    let p = params;
+    if (!/stereo=/.test(p)) p += ';stereo=1';
+    if (!/sprop-stereo=/.test(p)) p += ';sprop-stereo=1';
+    if (!/maxaveragebitrate=/.test(p)) p += ';maxaveragebitrate=192000';
+    return `a=fmtp:${pt} ${p}`;
+  });
+}
+
+const sdpTransform = (sdp) => tuneOpus(preferVideoCodec(sdp, 'H264'));
+
+// ---------- Peer-Verbindung zum Vermittlungsserver ----------
+function startPeer(attempt = 0) {
+  peer = new Peer(peerIdFor(myCode), { debug: 1, config: { iceServers: ICE_SERVERS } });
+
+  peer.on('open', () => {
+    log('online als', myCode);
+    el.myCode.textContent = myCode;
+    if (opts.selftest) log('SELFTEST-CODE', myCode);
+    setIdleText();
+    if (opts.autoConnect) connectTo(opts.autoConnect);
+  });
+
+  peer.on('connection', onIncomingConnection);
+  peer.on('call', onIncomingCall);
+
+  peer.on('disconnected', () => {
+    log('Vermittlung getrennt, verbinde neu');
+    setTimeout(() => { if (peer && !peer.destroyed) peer.reconnect(); }, 1500);
+  });
+
+  peer.on('error', (err) => {
+    log('peer error', err.type, err.message);
+    switch (err.type) {
+      case 'unavailable-id':
+        // Code noch belegt (z. B. App gerade neu gestartet) – kurz warten, sonst neuer Code
+        peer.destroy();
+        if (attempt < 3) {
+          el.myCode.textContent = '······';
+          setTimeout(() => startPeer(attempt + 1), 4000);
+        } else {
+          myCode = randomCode();
+          store('myCode', myCode);
+          startPeer(0);
+        }
+        break;
+      case 'peer-unavailable':
+        toast('Code nicht gefunden – läuft die App beim Kollegen?');
+        resetConnectUi();
+        break;
+      case 'network':
+      case 'server-error':
+      case 'socket-error':
+      case 'socket-closed':
+        toast('Keine Verbindung zum Vermittlungsserver – versuche erneut …');
+        break;
+      default:
+        toast(`Fehler: ${err.type}`);
+    }
+  });
+}
+
+// ---------- Verbinden ----------
+function connectTo(rawCode) {
+  const code = rawCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (code.length !== 6) return toast('Der Code hat 6 Zeichen.');
+  if (code === myCode) return toast('Das ist dein eigener Code 🙂');
+  if (conn) return;
+  el.connectBtn.disabled = true;
+  el.connectBtn.textContent = 'Verbinde …';
+  const c = peer.connect(peerIdFor(code), { reliable: true, metadata: { name: myName() } });
+  setupConnection(c);
+  setTimeout(() => {
+    if (conn === c && !c.open) {
+      toast('Verbindung fehlgeschlagen. Firewall oder Netzwerk blockiert evtl.');
+      dropConnection(c);
+    }
+  }, 20000);
+}
+
+function onIncomingConnection(c) {
+  if (conn && conn.open) {
+    c.on('open', () => { c.send({ type: 'busy' }); setTimeout(() => c.close(), 500); });
+    return;
+  }
+  if (conn && !conn.open) {
+    // beide haben gleichzeitig auf Verbinden gedrückt: eine Verbindung gewinnt deterministisch
+    if (peer.id < c.peer) { c.close(); return; }
+    const old = conn;
+    conn = null;
+    old.close();
+  }
+  setupConnection(c);
+}
+
+function setupConnection(c) {
+  conn = c;
+  c.on('open', () => {
+    if (conn !== c) return;
+    remoteLabel = c.metadata?.name || codeFromPeerId(c.peer);
+    c.send({ type: 'hello', name: myName() });
+    onConnected();
+  });
+  c.on('data', (msg) => { if (conn === c) handleMessage(msg); });
+  c.on('close', () => { if (conn === c) onDisconnected('Verbindung beendet'); });
+  c.on('error', (e) => log('conn error', e && e.message));
+}
+
+function handleMessage(msg) {
+  if (!msg || typeof msg !== 'object') return;
+  switch (msg.type) {
+    case 'hello':
+      remoteLabel = String(msg.name || remoteLabel).slice(0, 24);
+      el.remoteName.textContent = remoteLabel;
+      break;
+    case 'busy':
+      toast('Der Kollege ist schon mit jemand anderem verbunden.');
+      dropConnection(conn);
+      break;
+    case 'share-stop':
+      closeIncoming();
+      break;
+    case 'bye':
+      onDisconnected(`${remoteLabel} hat getrennt`);
+      break;
+  }
+}
+
+function onConnected() {
+  log('verbunden mit', conn.peer);
+  el.remoteName.textContent = remoteLabel;
+  el.connectBox.classList.add('hidden');
+  el.connectedBox.classList.remove('hidden');
+  el.shareBtn.disabled = false;
+  resetConnectUi();
+  setIdleText();
+  toast(`Verbunden mit ${remoteLabel}`);
+  if (opts.autoShare) autoShare();
+}
+
+function dropConnection(c) {
+  if (!c) return;
+  if (conn === c) conn = null;
+  try { c.close(); } catch {}
+  resetConnectUi();
+}
+
+function onDisconnected(reason) {
+  const c = conn;
+  conn = null;
+  try { c && c.close(); } catch {}
+  stopSharing(false);
+  closeIncoming();
+  el.connectBox.classList.remove('hidden');
+  el.connectedBox.classList.add('hidden');
+  el.shareBtn.disabled = true;
+  resetConnectUi();
+  setIdleText();
+  if (reason) toast(reason);
+}
+
+function resetConnectUi() {
+  el.connectBtn.disabled = false;
+  el.connectBtn.textContent = 'Verbinden';
+}
+
+function setIdleText() {
+  if (inCall) return;
+  el.placeholder.classList.remove('hidden');
+  if (conn && conn.open) {
+    el.placeholderTitle.textContent = `Verbunden mit ${remoteLabel}`;
+    el.placeholderText.textContent = 'Sobald einer von euch teilt, erscheint das Bild hier.';
+  } else {
+    el.placeholderTitle.textContent = 'Noch nicht verbunden';
+    el.placeholderText.textContent = 'Gib den Code deines Kollegen ein oder schick ihm deinen.';
+  }
+}
+
+// ---------- Quelle wählen ----------
+let pickerKind = 'screen';
+let pickerResolve = null;
+
+async function pickSource() {
+  el.picker.classList.remove('hidden');
+  await renderSources();
+  return new Promise((resolve) => { pickerResolve = resolve; });
+}
+
+async function renderSources() {
+  el.sourceGrid.innerHTML = '<div style="color:var(--muted)">Lade …</div>';
+  const sources = await window.api.getSources();
+  const list = sources.filter((s) => (pickerKind === 'screen') === s.isScreen);
+  el.sourceGrid.innerHTML = '';
+  if (!list.length) el.sourceGrid.innerHTML = '<div style="color:var(--muted)">Nichts gefunden.</div>';
+  list.forEach((s, i) => {
+    const b = document.createElement('button');
+    b.className = 'source';
+    const media = s.thumb ? document.createElement('img') : document.createElement('div');
+    if (s.thumb) media.src = s.thumb; else media.className = 'noimg';
+    const t = document.createElement('div');
+    t.className = 'title';
+    t.textContent = s.isScreen ? (list.length > 1 ? `Bildschirm ${i + 1}` : 'Ganzer Bildschirm') : s.name;
+    t.title = s.name;
+    b.append(media, t);
+    b.onclick = () => closePicker(s.id);
+    el.sourceGrid.append(b);
+  });
+}
+
+function closePicker(id) {
+  el.picker.classList.add('hidden');
+  if (pickerResolve) { pickerResolve(id); pickerResolve = null; }
+}
+
+document.querySelectorAll('.tab').forEach((tab) => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
+    pickerKind = tab.dataset.kind;
+    renderSources();
+  };
+});
+el.pickerClose.onclick = () => closePicker(null);
+
+// ---------- Teilen ----------
+async function startSharing(sourceId) {
+  if (!conn || !conn.open || outCall) return;
+  await window.api.selectSource(sourceId);
+  const q = QUALITY[el.quality.value];
+  try {
+    localStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { width: { ideal: q.width, max: q.width }, height: { ideal: q.height, max: q.height }, frameRate: { ideal: q.fps, max: q.fps } },
+      audio: true,
+    });
+  } catch (e) {
+    log('getDisplayMedia fehlgeschlagen', e.name, e.message);
+    toast('Bildschirm konnte nicht aufgenommen werden.');
+    return;
+  }
+
+  const vTrack = localStream.getVideoTracks()[0];
+  vTrack.contentHint = el.mode.value;
+  vTrack.onended = () => stopSharing(true);
+  if (!el.sendAudio.checked) localStream.getAudioTracks().forEach((t) => { t.stop(); localStream.removeTrack(t); });
+  log('teile', vTrack.getSettings().width + 'x' + vTrack.getSettings().height, 'audio:', localStream.getAudioTracks().length);
+
+  el.localVideo.srcObject = localStream;
+  el.previewBox.classList.remove('hidden');
+  el.shareBtn.classList.add('hidden');
+  el.stopBtn.classList.remove('hidden');
+
+  outCall = peer.call(conn.peer, localStream, { sdpTransform, metadata: { name: myName() } });
+  const call = outCall;
+  const pc = call.peerConnection;
+  const onState = () => {
+    log('Sende-Verbindung', pc.connectionState);
+    if (pc.connectionState === 'connected') applySenderParams();
+    if (pc.connectionState === 'failed' && outCall === call) {
+      toast('Übertragung fehlgeschlagen (Netzwerk/NAT).');
+      stopSharing(true);
+    }
+  };
+  pc.addEventListener('connectionstatechange', onState);
+  call.on('close', () => { if (outCall === call) stopSharing(false); });
+  call.on('error', (e) => log('call error', e && e.message));
+}
+
+async function applySenderParams() {
+  if (!outCall || !localStream) return;
+  const q = QUALITY[el.quality.value];
+  const vTrack = localStream.getVideoTracks()[0];
+  if (vTrack) {
+    vTrack.contentHint = el.mode.value;
+    try {
+      await vTrack.applyConstraints({ width: { ideal: q.width, max: q.width }, height: { ideal: q.height, max: q.height }, frameRate: { ideal: q.fps, max: q.fps } });
+    } catch (e) { log('applyConstraints', e.message); }
+  }
+  for (const sender of outCall.peerConnection.getSenders()) {
+    if (!sender.track) continue;
+    const p = sender.getParameters();
+    if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+    if (sender.track.kind === 'video') {
+      p.encodings[0].maxBitrate = q.bitrate;
+      p.encodings[0].maxFramerate = q.fps;
+      p.degradationPreference = el.mode.value === 'motion' ? 'maintain-framerate' : 'maintain-resolution';
+    } else {
+      p.encodings[0].maxBitrate = 192_000;
+    }
+    try { await sender.setParameters(p); } catch (e) { log('setParameters', e.message); }
+  }
+}
+
+function stopSharing(notify) {
+  if (notify && conn && conn.open) conn.send({ type: 'share-stop' });
+  const call = outCall;
+  outCall = null;
+  if (call) { try { call.close(); } catch {} }
+  if (localStream) localStream.getTracks().forEach((t) => t.stop());
+  localStream = null;
+  el.localVideo.srcObject = null;
+  el.previewBox.classList.add('hidden');
+  el.stopBtn.classList.add('hidden');
+  el.shareBtn.classList.remove('hidden');
+}
+
+// ---------- Empfangen ----------
+function onIncomingCall(call) {
+  if (!conn || !conn.open || call.peer !== conn.peer) { call.close(); return; }
+  closeIncoming();
+  inCall = call;
+  call.answer(undefined, { sdpTransform });
+  call.on('stream', (stream) => {
+    if (inCall !== call || el.remoteVideo.srcObject === stream) return;
+    log('Stream empfangen', 'video:', stream.getVideoTracks().length, 'audio:', stream.getAudioTracks().length);
+    el.remoteVideo.srcObject = stream;
+    el.remoteVideo.volume = Number(el.volume.value);
+    el.remoteVideo.play().catch((e) => log('play', e.message));
+    el.placeholder.classList.add('hidden');
+    if (opts.selftest) setTimeout(() => selftestReport(call), 6000);
+  });
+  call.peerConnection.addEventListener('connectionstatechange', () => {
+    const s = call.peerConnection.connectionState;
+    log('Empfangs-Verbindung', s);
+    if ((s === 'failed' || s === 'closed') && inCall === call) closeIncoming();
+  });
+  call.on('close', () => { if (inCall === call) closeIncoming(); });
+}
+
+function closeIncoming() {
+  const call = inCall;
+  inCall = null;
+  if (call) { try { call.close(); } catch {} }
+  el.remoteVideo.srcObject = null;
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  setIdleText();
+}
+
+// ---------- Statistik ----------
+const prevBytes = {};
+async function collectStats(pc, direction) {
+  const report = await pc.getStats();
+  const out = {};
+  let pair = null;
+  report.forEach((s) => {
+    if (s.type === direction && s.kind === 'video') {
+      out.w = s.frameWidth; out.h = s.frameHeight; out.fps = s.framesPerSecond;
+      out.vbytes = s.bytesSent ?? s.bytesReceived; out.codecId = s.codecId;
+      out.limit = s.qualityLimitationReason;
+      out.encoder = s.encoderImplementation; out.decoder = s.decoderImplementation;
+    }
+    if (s.type === direction && s.kind === 'audio') out.abytes = s.bytesSent ?? s.bytesReceived;
+    if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') pair = s;
+  });
+  if (out.codecId) { const c = report.get(out.codecId); out.codec = c && c.mimeType; }
+  if (pair) {
+    out.rtt = pair.currentRoundTripTime;
+    const local = report.get(pair.localCandidateId);
+    out.route = local ? local.candidateType : '?';
+  }
+  const key = direction;
+  const now = performance.now();
+  if (prevBytes[key] && out.vbytes != null) {
+    out.kbps = Math.round(((out.vbytes - prevBytes[key].b) * 8) / (now - prevBytes[key].t));
+  }
+  prevBytes[key] = { b: out.vbytes || 0, t: now };
+  return out;
+}
+
+function fmtStats(label, s) {
+  const route = { host: 'direkt (LAN)', srflx: 'direkt (Internet)', prflx: 'direkt', relay: 'Relay' }[s.route] || s.route || '?';
+  const lines = [
+    `${label}: ${s.w || '?'}x${s.h || '?'} @ ${s.fps ?? '?'} fps`,
+    `Codec: ${(s.codec || '?').replace('video/', '')} ${s.encoder || s.decoder ? '· ' + (s.encoder || s.decoder) : ''}`,
+    `Bitrate: ${s.kbps != null ? (s.kbps / 1000).toFixed(1) + ' Mbit/s' : '…'}`,
+    `Ping: ${s.rtt != null ? Math.round(s.rtt * 1000) + ' ms' : '?'} · ${route}`,
+  ];
+  if (s.limit && s.limit !== 'none') lines.push(`Begrenzt durch: ${s.limit}`);
+  return lines.join('\n');
+}
+
+setInterval(async () => {
+  if (!statsVisible) return;
+  const parts = [];
+  try {
+    if (inCall) parts.push(fmtStats('Empfang', await collectStats(inCall.peerConnection, 'inbound-rtp')));
+    if (outCall) parts.push(fmtStats('Senden', await collectStats(outCall.peerConnection, 'outbound-rtp')));
+  } catch {}
+  el.stats.textContent = parts.join('\n\n') || 'Keine Übertragung aktiv';
+}, 1000);
+
+// ---------- Selbsttest (nur mit --selftest / --auto-share) ----------
+async function autoShare() {
+  const sources = await window.api.getSources();
+  const screen = sources.find((s) => s.isScreen);
+  if (screen) setTimeout(() => startSharing(screen.id), 1000);
+}
+
+async function selftestReport(call) {
+  const pc = call.peerConnection;
+  await collectStats(pc, 'inbound-rtp');
+  await new Promise((r) => setTimeout(r, 2000));
+  const s = await collectStats(pc, 'inbound-rtp');
+  log('SELFTEST-RECV', JSON.stringify({ ...s, audioTracks: el.remoteVideo.srcObject?.getAudioTracks().length }));
+}
+
+// ---------- UI-Verdrahtung ----------
+el.connectBtn.onclick = () => connectTo(el.remoteCode.value);
+el.remoteCode.addEventListener('keydown', (e) => { if (e.key === 'Enter') connectTo(el.remoteCode.value); });
+el.remoteCode.addEventListener('input', () => { el.remoteCode.value = el.remoteCode.value.toUpperCase(); });
+el.disconnectBtn.onclick = () => {
+  if (conn && conn.open) conn.send({ type: 'bye' });
+  setTimeout(() => onDisconnected(null), 150);
+};
+el.copyBtn.onclick = async () => {
+  try { await navigator.clipboard.writeText(myCode); toast('Code kopiert'); } catch { toast(myCode); }
+};
+el.myName.value = store('myName') || '';
+el.myName.addEventListener('change', () => {
+  store('myName', el.myName.value.trim());
+  if (conn && conn.open) conn.send({ type: 'hello', name: myName() });
+});
+el.shareBtn.onclick = async () => {
+  const id = await pickSource();
+  if (id) startSharing(id);
+};
+el.stopBtn.onclick = () => stopSharing(true);
+el.quality.onchange = () => { store('quality', el.quality.value); applySenderParams(); };
+el.mode.onchange = () => { store('mode', el.mode.value); applySenderParams(); };
+el.sendAudio.onchange = () => store('sendAudio', el.sendAudio.checked ? '1' : '0');
+el.volume.oninput = () => { el.remoteVideo.volume = Number(el.volume.value); store('volume', el.volume.value); };
+el.statsBtn.onclick = () => { statsVisible = !statsVisible; el.stats.classList.toggle('hidden', !statsVisible); };
+const toggleFullscreen = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else el.stage.requestFullscreen().catch(() => {});
+};
+el.fullscreenBtn.onclick = toggleFullscreen;
+el.remoteVideo.ondblclick = toggleFullscreen;
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'F11') { e.preventDefault(); toggleFullscreen(); }
+  if (e.key === 'Escape' && !el.picker.classList.contains('hidden')) closePicker(null);
+});
+window.addEventListener('beforeunload', () => {
+  try { if (conn && conn.open) conn.send({ type: 'bye' }); } catch {}
+  try { peer && peer.destroy(); } catch {}
+});
+
+// gespeicherte Einstellungen
+if (QUALITY[store('quality')]) el.quality.value = store('quality');
+if (store('mode')) el.mode.value = store('mode');
+if (store('sendAudio') === '0') el.sendAudio.checked = false;
+if (store('volume') != null) el.volume.value = store('volume');
+
+// ---------- Start ----------
+(async () => {
+  opts = await window.api.launchOptions();
+  myCode = store('myCode');
+  if (!myCode || myCode.length !== 6) { myCode = randomCode(); store('myCode', myCode); }
+  if (opts.selftest && !store('myName')) el.myName.value = opts.profile || 'Test';
+  startPeer();
+})();

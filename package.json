@@ -1,0 +1,37 @@
+{
+  "name": "screenlink",
+  "version": "1.0.0",
+  "description": "Bildschirmübertragung mit Ton zwischen zwei PCs",
+  "main": "src/main.js",
+  "author": "",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "de.lio.screenlink",
+    "productName": "ScreenLink",
+    "files": [
+      "src/**",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "portable"
+    },
+    "portable": {
+      "artifactName": "ScreenLink.exe"
+    }
+  },
+  "dependencies": {
+    "peerjs": "^1.5.5"
+  },
+  "devDependencies": {
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0"
+  }
+}
