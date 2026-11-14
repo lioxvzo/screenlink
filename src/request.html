@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+  <style>
+    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; font: 14px "Segoe UI", system-ui, sans-serif; user-select: none; color: #e7e9ee; }
+    .card {
+      box-sizing: border-box; height: 100%; padding: 18px 20px; background: #171a21;
+      border: 2px solid #5865f2; border-radius: 12px; display: flex; flex-direction: column; gap: 10px;
+    }
+    h1 { margin: 0; font-size: 17px; }
+    p { margin: 0; color: #8b92a1; font-size: 13px; line-height: 1.4; }
+    .row { display: flex; gap: 10px; margin-top: auto; align-items: center; }
+    button { font: inherit; border: 0; border-radius: 6px; padding: 9px 18px; cursor: pointer; font-weight: 600; }
+    #yes { background: #23a55a; color: #fff; }
+    #no { background: #2a2f3a; color: #e7e9ee; }
+    #t { margin-left: auto; color: #8b92a1; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1><span id="who">Jemand</span> möchte deinen PC steuern</h1>
+    <p>Dann kann <span id="who2"></span> Maus und Tastatur auf dem geteilten Bildschirm benutzen.
+       Beenden jederzeit über den roten Balken oben oder Strg+Alt+Shift+S.</p>
+    <div class="row">
+      <button id="yes">Erlauben</button>
+      <button id="no">Ablehnen</button>
+      <span id="t"></span>
+    </div>
+  </div>
+  <script>
+    const q = new URLSearchParams(location.search);
+    const name = q.get('name') || 'Jemand';
+    document.getElementById('who').textContent = name;
+    document.getElementById('who2').textContent = name;
+    let left = Number(q.get('timeout') || 60);
+    const t = document.getElementById('t');
+    const tick = () => { t.textContent = `läuft ab in ${left} s`; if (left-- <= 0) window.api.answerControl(false); };
+    tick(); setInterval(tick, 1000);
+    document.getElementById('yes').onclick = () => window.api.answerControl(true);
+    document.getElementById('no').onclick = () => window.api.answerControl(false);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.api.answerControl(false); });
+  </script>
+</body>
+</html>

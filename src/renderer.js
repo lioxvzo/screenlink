@@ -44,6 +44,7 @@ let statsVisible = false;
 let opts = {};
 let viewerCtrl = 'off';   // ich steuere den Kollegen: 'off' | 'pending' | 'on'
 let hostCtrl = false;     // der Kollege steuert mich
+let remoteVersion = null;
 
 const log = (...a) => { console.log(...a); window.api.log(...a); };
 window.addEventListener('error', (e) => log('JS-Fehler', e.message, e.filename, e.lineno));
@@ -191,7 +192,7 @@ function setupConnection(c) {
   c.on('open', () => {
     if (conn !== c) return;
     remoteLabel = c.metadata?.name || codeFromPeerId(c.peer);
-    c.send({ type: 'hello', name: myName() });
+    c.send({ type: 'hello', name: myName(), version: opts.version });
     onConnected();
   });
   c.on('data', (msg) => { if (conn === c) handleMessage(msg); });
@@ -204,6 +205,8 @@ function handleMessage(msg) {
   switch (msg.type) {
     case 'hello':
       remoteLabel = String(msg.name || remoteLabel).slice(0, 24);
+      remoteVersion = msg.version ? String(msg.version).slice(0, 16) : null;
+      log('Partner', remoteLabel, 'Version', remoteVersion || 'alt (< 1.1.2)');
       el.remoteName.textContent = remoteLabel;
       break;
     case 'busy':
@@ -218,13 +221,16 @@ function handleMessage(msg) {
       break;
     // --- Fernsteuerung ---
     case 'control-request':
+      log('Steuerungsanfrage empfangen');
       onControlRequest();
       break;
     case 'control-granted':
+      log('Steuerung erhalten');
       if (viewerCtrl === 'pending' && inCall) setViewerCtrl('on');
       else send({ type: 'control-release' });
       break;
     case 'control-denied': {
+      log('Steuerung abgelehnt, Grund:', msg.reason);
       const why = {
         window: `${remoteLabel} teilt nur ein Fenster. Steuerung geht nur bei ganzem Bildschirm.`,
         notsharing: `${remoteLabel} teilt gerade nichts.`,
@@ -235,6 +241,7 @@ function handleMessage(msg) {
       break;
     }
     case 'control-revoked':
+      log('Steuerung entzogen');
       if (viewerCtrl !== 'off') { setViewerCtrl('off'); toast(`${remoteLabel} hat die Steuerung beendet.`); }
       break;
     case 'control-release':
@@ -316,10 +323,15 @@ function requestControl() {
   }
   if (viewerCtrl === 'pending' || !inCall) return;
   send({ type: 'control-request' });
+  log('Steuerung angefragt; Partner-Version', remoteVersion || 'alt');
   setViewerCtrl('pending');
+  toast(`Anfrage gesendet – ${remoteLabel} muss zustimmen.`);
   ctrlTimer = setTimeout(() => {
-    if (viewerCtrl === 'pending') { setViewerCtrl('off'); toast('Keine Antwort auf die Anfrage.'); }
-  }, 35000);
+    if (viewerCtrl !== 'pending') return;
+    setViewerCtrl('off');
+    log('Steuerungsanfrage ohne Antwort');
+    toast(remoteVersion ? 'Keine Antwort auf die Anfrage.' : `Keine Antwort – ${remoteLabel} hat vermutlich eine alte Version (in Claude „ScreenLink updaten“).`, 7000);
+  }, 65000);
 }
 
 function sendInput(e) {
@@ -414,6 +426,7 @@ function onConnected() {
   resetConnectUi();
   setIdleText();
   toast(`Verbunden mit ${remoteLabel}`);
+  setTimeout(() => { if (conn && conn.open && !remoteVersion) toast(`${remoteLabel} nutzt eine alte ScreenLink-Version. Für Steuerung bitte updaten.`, 6000); }, 3000);
   if (opts.autoShare) autoShare();
 }
 
@@ -517,6 +530,7 @@ async function startSharing(sourceId) {
   vTrack.contentHint = el.mode.value;
   vTrack.onended = () => stopSharing(true);
   if (!el.sendAudio.checked) localStream.getAudioTracks().forEach((t) => { t.stop(); localStream.removeTrack(t); });
+  window.api.setShareInfo({ w: vTrack.getSettings().width, h: vTrack.getSettings().height });
   log('teile', vTrack.getSettings().width + 'x' + vTrack.getSettings().height, 'audio:', localStream.getAudioTracks().length);
 
   el.localVideo.srcObject = localStream;
@@ -752,7 +766,7 @@ el.copyBtn.onclick = async () => {
 el.myName.value = store('myName') || '';
 el.myName.addEventListener('change', () => {
   store('myName', el.myName.value.trim());
-  if (conn && conn.open) conn.send({ type: 'hello', name: myName() });
+  if (conn && conn.open) conn.send({ type: 'hello', name: myName(), version: opts.version });
 });
 el.shareBtn.onclick = async () => {
   const id = await pickSource();

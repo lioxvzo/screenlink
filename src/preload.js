@@ -11,5 +11,7 @@ contextBridge.exposeInMainWorld('api', {
   controlInput: (ev) => ipcRenderer.send('control-input', ev),
   onControlEndedLocal: (fn) => ipcRenderer.on('control-ended-local', () => fn()),
   stopControlFromOverlay: () => ipcRenderer.send('control-stop-local'),
+  answerControl: (ok) => ipcRenderer.send('control-answer', !!ok),
+  setShareInfo: (info) => ipcRenderer.send('share-info', info),
   cursorPos: () => ipcRenderer.invoke('cursor-pos'),
 });

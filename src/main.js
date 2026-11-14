@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, dialog, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, globalShortcut } = require('electron');
 const path = require('path');
 
 let input = null;
@@ -90,11 +90,78 @@ function createWindow() {
 }
 
 // ---------- Fernsteuerung (Seite, die geteilt wird) ----------
+let shareSize = null; // tatsächliche Größe des geteilten Videos {w, h}
+
+// Monitor zur geteilten Quelle finden: display_id → Auflösung → Seitenverhältnis → Hauptmonitor
 function displayForSource(src) {
-  const displays = screen.getAllDisplays();
-  if (!src) return null;
-  return displays.find((d) => String(d.id) === String(src.display_id)) ||
-    (displays.length === 1 ? displays[0] : null);
+  if (!src || !src.id.startsWith('screen:')) return null;
+  const ds = screen.getAllDisplays();
+  let d = ds.find((x) => src.display_id && String(x.id) === String(src.display_id));
+  let how = 'display_id';
+  if (!d && ds.length === 1) { d = ds[0]; how = 'einziger Monitor'; }
+  if (!d && shareSize) {
+    const phys = (x) => ({ w: Math.round(x.bounds.width * x.scaleFactor), h: Math.round(x.bounds.height * x.scaleFactor) });
+    const exact = ds.filter((x) => Math.abs(phys(x).w - shareSize.w) <= 2 && Math.abs(phys(x).h - shareSize.h) <= 2);
+    if (exact.length === 1) { d = exact[0]; how = 'Auflösung'; }
+    if (!d) {
+      const ar = shareSize.w / shareSize.h;
+      const same = ds.filter((x) => Math.abs(x.bounds.width / x.bounds.height - ar) < 0.02);
+      if (same.length === 1) { d = same[0]; how = 'Seitenverhältnis'; }
+    }
+  }
+  if (!d) { d = screen.getPrimaryDisplay(); how = 'Hauptmonitor (Notlösung)'; }
+  console.log(`[${profile || 'main'}] Monitor für ${src.id} (display_id="${src.display_id}") über ${how}: ${d.id} ${JSON.stringify(d.bounds)} x${d.scaleFactor}`);
+  return d;
+}
+
+// ---------- Anfrage-Fenster (immer im Vordergrund, nicht im Stream sichtbar) ----------
+let requestWin = null;
+let requestResolve = null;
+
+function askViaWindow(name, display, timeoutSec) {
+  return new Promise((resolve) => {
+    closeRequestWindow(false);
+    requestResolve = resolve;
+    const w = 460, h = 180;
+    const b = display.workArea;
+    requestWin = new BrowserWindow({
+      x: Math.round(b.x + (b.width - w) / 2),
+      y: Math.round(b.y + (b.height - h) / 2),
+      width: w,
+      height: h,
+      frame: false,
+      transparent: true,
+      resizable: false,
+      skipTaskbar: false,
+      alwaysOnTop: true,
+      show: false,
+      title: 'ScreenLink – Steuerungsanfrage',
+      webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
+    });
+    requestWin.setAlwaysOnTop(true, 'screen-saver');
+    requestWin.setContentProtection(true);
+    requestWin.loadFile(path.join(__dirname, 'request.html'), { query: { name, timeout: String(timeoutSec) } });
+    requestWin.once('ready-to-show', () => {
+      if (!requestWin) return;
+      requestWin.show();
+      requestWin.focus();
+      requestWin.moveTop();
+      if (launchOptions.selftest && process.argv.includes('--real-ask')) {
+        console.log(`[${profile}] SELFTEST Anfrage-Fenster sichtbar: ${requestWin.isVisible()}, oben: ${requestWin.isAlwaysOnTop()}`);
+        setTimeout(() => requestWin && requestWin.webContents.executeJavaScript("document.getElementById('yes').click()"), 1500);
+      }
+    });
+    requestWin.on('closed', () => { requestWin = null; closeRequestWindow(false); });
+    setTimeout(() => closeRequestWindow(false), (timeoutSec + 2) * 1000);
+  });
+}
+
+function closeRequestWindow(answer) {
+  const r = requestResolve;
+  requestResolve = null;
+  if (requestWin && !requestWin.isDestroyed()) requestWin.destroy();
+  requestWin = null;
+  if (r) r(answer);
 }
 
 function showOverlay(display, name) {
@@ -261,43 +328,32 @@ app.whenReady().then(() => {
   // Steuerungsanfrage vom Partner: Nutzer fragen. Rückgabe: 'granted' | 'denied' | 'window' | 'unsupported'
   ipcMain.handle('control-ask', async (_e, rawName) => {
     const name = String(rawName || 'Dein Partner').slice(0, 24);
+    const tag = `[${profile || 'main'}]`;
+    console.log(`${tag} Steuerungsanfrage von ${name}; Quelle ${sharedSource && sharedSource.id}; Eingabemodul ${input ? 'ok' : 'FEHLT'}`);
     if (!input) return 'unsupported';
-    if (!sharedSource || !sharedSource.id.startsWith('screen:') || !displayForSource(sharedSource)) return 'window';
+    if (!sharedSource || !sharedSource.id.startsWith('screen:')) return 'window';
     if (control.active) return 'granted';
-    if (launchOptions.selftest && launchOptions.autoShare) { startControl(name); return 'granted'; }
+    const realAsk = process.argv.includes('--real-ask');
+    if (launchOptions.selftest && launchOptions.autoShare && !realAsk) { startControl(name); return 'granted'; }
 
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
-    win.flashFrame(true);
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 30000);
-    let res;
-    try {
-      res = await dialog.showMessageBox(win, {
-        type: 'question',
-        title: 'Steuerung anfragen',
-        message: `${name} möchte deinen PC steuern.`,
-        detail: `${name} kann dann Maus und Tastatur auf dem geteilten Bildschirm benutzen.\n\nDu kannst die Steuerung jederzeit beenden: Button oben am Bildschirm oder Strg+Alt+Shift+S.`,
-        buttons: ['Erlauben', 'Ablehnen'],
-        defaultId: 1,
-        cancelId: 1,
-        noLink: true,
-        signal: ac.signal,
-      });
-    } catch {
-      res = { response: 1 };
-    } finally {
-      clearTimeout(timer);
-      win.flashFrame(false);
-    }
-    if (res.response !== 0) return 'denied';
+    const display = displayForSource(sharedSource) || screen.getPrimaryDisplay();
+    if (win) win.flashFrame(true);
+    const ok = await askViaWindow(name, display, 60);
+    if (win) win.flashFrame(false);
+    console.log(`${tag} Antwort auf Steuerungsanfrage: ${ok ? 'erlaubt' : 'abgelehnt/abgelaufen'}`);
+    if (!ok) return 'denied';
     if (!sharedSource || !sharedSource.id.startsWith('screen:')) return 'window';
     startControl(name);
     return 'granted';
   });
 
-  ipcMain.on('control-end', () => endControl('renderer'));
+  ipcMain.on('control-answer', (e, ok) => {
+    if (requestWin && e.sender === requestWin.webContents) closeRequestWindow(!!ok);
+  });
+  ipcMain.on('share-info', (_e, info) => {
+    if (info && info.w > 0 && info.h > 0) shareSize = { w: Number(info.w), h: Number(info.h) };
+  });
+  ipcMain.on('control-end', () => { closeRequestWindow(false); endControl('renderer'); });
   ipcMain.on('control-stop-local', () => endControl('overlay'));
   ipcMain.on('control-input', (_e, ev) => {
     try { handleInput(ev); } catch (err) { console.error('input', err); }
