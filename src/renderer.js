@@ -46,6 +46,8 @@ let viewerCtrl = 'off';   // ich steuere den Kollegen: 'off' | 'pending' | 'on'
 let hostCtrl = false;     // der Kollege steuert mich
 
 const log = (...a) => { console.log(...a); window.api.log(...a); };
+window.addEventListener('error', (e) => log('JS-Fehler', e.message, e.filename, e.lineno));
+window.addEventListener('unhandledrejection', (e) => log('Promise-Fehler', e.reason && (e.reason.stack || e.reason)));
 
 function store(key, value) {
   try { if (value === undefined) return localStorage.getItem(key); localStorage.setItem(key, value); } catch { return null; }
@@ -502,16 +504,12 @@ el.pickerClose.onclick = () => closePicker(null);
 // ---------- Teilen ----------
 async function startSharing(sourceId) {
   if (!conn || !conn.open || outCall) return;
-  await window.api.selectSource(sourceId);
   const q = QUALITY[el.quality.value];
   try {
-    localStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { width: { ideal: q.width, max: q.width }, height: { ideal: q.height, max: q.height }, frameRate: { ideal: q.fps, max: q.fps } },
-      audio: true,
-    });
+    localStream = await captureWithFallback(sourceId, q, el.sendAudio.checked);
   } catch (e) {
-    log('getDisplayMedia fehlgeschlagen', e.name, e.message);
-    toast('Bildschirm konnte nicht aufgenommen werden.');
+    log('Aufnahme endgültig fehlgeschlagen', e.name, e.message);
+    toast(`Bildschirm konnte nicht aufgenommen werden (${e.name}: ${e.message}). Details stehen in der Logdatei.`, 9000);
     return;
   }
 
@@ -540,6 +538,46 @@ async function startSharing(sourceId) {
   pc.addEventListener('connectionstatechange', onState);
   call.on('close', () => { if (outCall === call) stopSharing(false); });
   call.on('error', (e) => log('call error', e && e.message));
+}
+
+// Aufnahme mit Ausweichwegen: 1) mit Ton  2) ohne Ton  3) alter Capture-Weg (mit/ohne Ton)
+async function captureWithFallback(sourceId, q, wantAudio) {
+  const isScreen = sourceId.startsWith('screen:');
+  const forced = opts.captureMode; // nur für Tests: 'legacy' | 'noaudio'
+  const modern = async (audio) => {
+    await window.api.selectSource(sourceId, audio);
+    return navigator.mediaDevices.getDisplayMedia({
+      video: { width: { ideal: q.width, max: q.width }, height: { ideal: q.height, max: q.height }, frameRate: { ideal: q.fps, max: q.fps } },
+      audio,
+    });
+  };
+  const legacy = async (audio) => (await window.api.selectSource(sourceId, audio)) && navigator.mediaDevices.getUserMedia({
+    audio: audio && isScreen ? { mandatory: { chromeMediaSource: 'desktop' } } : false,
+    video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId, maxWidth: q.width, maxHeight: q.height, maxFrameRate: q.fps } },
+  });
+
+  const attempts = [];
+  if (forced !== 'legacy') {
+    if (wantAudio && forced !== 'noaudio') attempts.push(['modern+ton', () => modern(true)]);
+    attempts.push(['modern', () => modern(false)]);
+  }
+  if (wantAudio && isScreen) attempts.push(['alt+ton', () => legacy(true)]);
+  attempts.push(['alt', () => legacy(false)]);
+
+  let lastErr = null;
+  for (const [name, fn] of attempts) {
+    try {
+      const s = await fn();
+      if (!s.getVideoTracks().length) throw new Error('kein Videobild');
+      log('Aufnahme ok über', name, 'audio:', s.getAudioTracks().length);
+      if (wantAudio && !s.getAudioTracks().length) toast('Ton konnte nicht aufgenommen werden, teile ohne Ton.', 5000);
+      return s;
+    } catch (e) {
+      lastErr = e;
+      log('Aufnahme-Versuch fehlgeschlagen:', name, e.name, e.message);
+    }
+  }
+  throw lastErr || new Error('unbekannt');
 }
 
 async function applySenderParams() {
@@ -752,6 +790,7 @@ if (store('volume') != null) el.volume.value = store('volume');
 // ---------- Start ----------
 (async () => {
   opts = await window.api.launchOptions();
+  log('ScreenLink', opts.version, navigator.userAgent);
   myCode = store('myCode');
   if (!myCode || myCode.length !== 6) { myCode = randomCode(); store('myCode', myCode); }
   if (opts.selftest && !store('myName')) el.myName.value = opts.profile || 'Test';

@@ -23,8 +23,32 @@ const launchOptions = {
   autoShare: process.argv.includes('--auto-share'),
   autoControl: process.argv.includes('--auto-control'),
   selftest: process.argv.includes('--selftest'),
+  captureMode: argValue('capture'),
   version: app.getVersion(),
 };
+
+// --- Logdatei: %APPDATA%\ScreenLink\screenlink.log (bei jedem Start neu) ---
+const fs = require('fs');
+const os = require('os');
+let logStream = null;
+try {
+  const logFile = path.join(app.getPath('userData'), 'screenlink.log');
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  logStream = fs.createWriteStream(logFile, { flags: 'w' });
+  launchOptions.logFile = logFile;
+} catch {}
+for (const level of ['log', 'error']) {
+  const orig = console[level].bind(console);
+  console[level] = (...a) => {
+    orig(...a);
+    if (logStream) {
+      const line = a.map((x) => (x instanceof Error ? x.stack : typeof x === 'object' ? JSON.stringify(x) : String(x))).join(' ');
+      logStream.write(`${new Date().toISOString()} ${level === 'error' ? 'FEHLER ' : ''}${line}\n`);
+    }
+  };
+}
+console.log(`ScreenLink ${app.getVersion()} · Electron ${process.versions.electron} · Windows ${os.release()} · ${os.cpus()[0]?.model}`);
+process.on('uncaughtException', (e) => console.error('uncaught', e));
 
 // Ton des Partners ohne Klick abspielen
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -34,6 +58,7 @@ const STOP_SHORTCUT = 'Control+Alt+Shift+S';
 let win = null;
 let overlay = null;
 let selectedSourceId = null;
+let selectedAudio = true;
 let sharedSource = null; // tatsächlich geteilte Quelle (mit display_id)
 
 const control = {
@@ -178,6 +203,10 @@ function handleInput(e) {
 }
 
 app.whenReady().then(() => {
+  app.getGPUInfo('basic')
+    .then((g) => console.log('GPU', JSON.stringify((g.gpuDevice || []).map((d) => ({ vendor: d.vendorId, device: d.deviceId, active: d.active, driver: d.driverVersion })))))
+    .catch(() => {});
+  console.log('Displays', JSON.stringify(screen.getAllDisplays().map((d) => ({ id: d.id, bounds: d.bounds, scale: d.scaleFactor }))));
   // Liefert die in der App ausgewählte Quelle an getDisplayMedia, inkl. Systemton
   session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
     try {
@@ -188,7 +217,8 @@ app.whenReady().then(() => {
       if (!src) return callback({});
       sharedSource = src;
       const result = { video: src };
-      if (process.platform === 'win32') result.audio = 'loopback';
+      if (process.platform === 'win32' && selectedAudio) result.audio = 'loopback';
+      console.log(`[${profile || 'main'}] Aufnahme-Anfrage: ${src.id} (${src.name}) Ton: ${!!result.audio}`);
       callback(result);
     } catch (e) {
       console.error('display media handler', e);
@@ -212,8 +242,13 @@ app.whenReady().then(() => {
       }));
   });
 
-  ipcMain.handle('select-source', (_e, id) => {
+  ipcMain.handle('select-source', async (_e, id, audio) => {
     selectedSourceId = id;
+    selectedAudio = audio !== false;
+    try {
+      const sources = await desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } });
+      sharedSource = sources.find((s) => s.id === id) || sharedSource;
+    } catch (e) { console.log('getSources', e.message); }
     return true;
   });
 
