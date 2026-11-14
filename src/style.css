@@ -226,6 +226,9 @@ input[type=range] { padding: 0; accent-color: var(--accent); width: 120px; borde
 }
 
 .toast {
+  display: flex;
+  align-items: center;
+  max-width: min(760px, 86vw);
   position: fixed;
   left: 50%;
   bottom: 76px;

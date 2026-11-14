@@ -47,7 +47,15 @@ for (const level of ['log', 'error']) {
     }
   };
 }
-console.log(`ScreenLink ${app.getVersion()} · Electron ${process.versions.electron} · Windows ${os.release()} · ${os.cpus()[0]?.model}`);
+// --- Einstellungen + Kompatibilitätsmodus (WGC aus → DirectX/GDI-Capturer) ---
+const settingsFile = path.join(app.getPath('userData'), 'settings.json');
+let settings = {};
+try { settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch {}
+launchOptions.compat = !!settings.compat || process.argv.includes('--compat');
+if (launchOptions.compat) {
+  app.commandLine.appendSwitch('disable-features', 'AllowWgcScreenCapturer,AllowWgcWindowCapturer,AllowWgcZeroHz');
+}
+console.log(`ScreenLink ${app.getVersion()} · Kompatibilitätsmodus: ${launchOptions.compat ? 'AN' : 'aus'} · Electron ${process.versions.electron} · Windows ${os.release()} · ${os.cpus()[0]?.model}`);
 process.on('uncaughtException', (e) => console.error('uncaught', e));
 
 // Ton des Partners ohne Klick abspielen
@@ -320,6 +328,16 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('launch-options', () => launchOptions);
+
+  ipcMain.on('set-compat', (_e, on) => {
+    settings.compat = !!on;
+    try { fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2)); } catch (e) { console.error('settings', e); }
+    console.log(`Kompatibilitätsmodus ${on ? 'AN' : 'aus'} – Neustart`);
+    const args = process.argv.slice(1).filter((a) => a !== '--compat');
+    const portable = process.env.PORTABLE_EXECUTABLE_FILE;
+    app.relaunch(portable ? { execPath: portable, args: [] } : { args });
+    app.exit(0);
+  });
 
   ipcMain.on('log', (_e, msg) => {
     console.log(`[${profile || 'main'}] ${msg}`);

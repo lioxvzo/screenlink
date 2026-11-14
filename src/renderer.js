@@ -55,8 +55,16 @@ function store(key, value) {
   return null;
 }
 
-function toast(msg, ms = 2600) {
+function toast(msg, ms = 2600, action = null) {
   el.toast.textContent = msg;
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'primary';
+    b.style.marginLeft = '12px';
+    b.textContent = action.label;
+    b.onclick = () => { el.toast.classList.add('hidden'); action.fn(); };
+    el.toast.append(b);
+  }
   el.toast.classList.remove('hidden');
   clearTimeout(toast.t);
   toast.t = setTimeout(() => el.toast.classList.add('hidden'), ms);
@@ -522,7 +530,13 @@ async function startSharing(sourceId) {
     localStream = await captureWithFallback(sourceId, q, el.sendAudio.checked);
   } catch (e) {
     log('Aufnahme endgültig fehlgeschlagen', e.name, e.message);
-    toast(`Bildschirm konnte nicht aufgenommen werden (${e.name}: ${e.message}). Details stehen in der Logdatei.`, 9000);
+    if (!opts.compat) {
+      toast(`Bildschirm konnte nicht aufgenommen werden (${e.name}: ${e.message}). Der Kompatibilitätsmodus nutzt einen anderen Aufnahmeweg.`, 30000,
+        { label: 'Kompatibilitätsmodus + Neustart', fn: () => window.api.setCompat(true) });
+    } else {
+      toast(`Auch im Kompatibilitätsmodus fehlgeschlagen (${e.name}: ${e.message}). Details stehen in der Logdatei.`, 30000,
+        { label: 'Normalmodus + Neustart', fn: () => window.api.setCompat(false) });
+    }
     return;
   }
 
@@ -574,6 +588,7 @@ async function captureWithFallback(sourceId, q, wantAudio) {
   if (forced !== 'legacy') {
     if (wantAudio && forced !== 'noaudio') attempts.push(['modern+ton', () => modern(true)]);
     attempts.push(['modern', () => modern(false)]);
+    attempts.push(['modern-minimal', async () => { await window.api.selectSource(sourceId, false); return navigator.mediaDevices.getDisplayMedia({ video: true, audio: false }); }]);
   }
   if (wantAudio && isScreen) attempts.push(['alt+ton', () => legacy(true)]);
   attempts.push(['alt', () => legacy(false)]);
@@ -804,7 +819,15 @@ if (store('volume') != null) el.volume.value = store('volume');
 // ---------- Start ----------
 (async () => {
   opts = await window.api.launchOptions();
-  log('ScreenLink', opts.version, navigator.userAgent);
+  log('ScreenLink', opts.version, 'Kompatibilitätsmodus', opts.compat ? 'AN' : 'aus', navigator.userAgent);
+  if (opts.compat) {
+    const b = document.createElement('button');
+    b.className = 'ghost';
+    b.textContent = 'Kompatibilitätsmodus an · ausschalten';
+    b.title = 'Normalen Aufnahmeweg (Windows Graphics Capture) wieder nutzen. Startet die App neu.';
+    b.onclick = () => window.api.setCompat(false);
+    document.querySelector('.controls .spacer').after(b);
+  }
   myCode = store('myCode');
   if (!myCode || myCode.length !== 6) { myCode = randomCode(); store('myCode', myCode); }
   if (opts.selftest && !store('myName')) el.myName.value = opts.profile || 'Test';

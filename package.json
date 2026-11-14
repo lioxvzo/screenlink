@@ -1,6 +1,6 @@
 {
   "name": "screenlink",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "Bildschirmübertragung mit Ton zwischen zwei PCs",
   "main": "src/main.js",
   "author": "",
