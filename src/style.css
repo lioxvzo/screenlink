@@ -225,6 +225,13 @@ input[type=range] { padding: 0; accent-color: var(--accent); width: 120px; borde
   text-overflow: ellipsis;
 }
 
+.req-card { width: min(520px, 92vw); border: 2px solid var(--accent); gap: 12px; }
+.req-card h2 { margin: 0; font-size: 18px; }
+.req-text { margin: 0; color: var(--muted); }
+.req-row { display: flex; gap: 10px; align-items: center; }
+.req-yes { background: var(--ok) !important; }
+.req-timer { margin-left: auto; color: var(--muted); font-size: 12px; }
+
 .toast {
   display: flex;
   align-items: center;

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, session, screen, globalShortcut, Notification } = require('electron');
 const path = require('path');
 
 let input = null;
@@ -17,6 +17,17 @@ const profile = argValue('profile');
 if (profile) {
   app.setPath('userData', path.join(app.getPath('appData'), `ScreenLink-${profile}`));
 }
+// Nur eine Instanz pro Profil – ein zweiter Start holt die laufende App nach vorn
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+  return;
+}
+app.on('second-instance', () => {
+  const w = BrowserWindow.getAllWindows().find((x) => x.getTitle().startsWith('ScreenLink') && !x.getTitle().includes('Steuerungsanfrage'));
+  if (w) { if (w.isMinimized()) w.restore(); w.show(); w.focus(); }
+});
+if (process.platform === 'win32') app.setAppUserModelId('de.lio.screenlink');
+
 const launchOptions = {
   profile,
   autoConnect: argValue('auto-connect'),
@@ -27,14 +38,17 @@ const launchOptions = {
   version: app.getVersion(),
 };
 
-// --- Logdatei: %APPDATA%\ScreenLink\screenlink.log (bei jedem Start neu) ---
+// --- Logdatei: %APPDATA%\ScreenLink\screenlink.log (wird fortgeschrieben, ab 2 MB neu begonnen) ---
 const fs = require('fs');
 const os = require('os');
 let logStream = null;
 try {
   const logFile = path.join(app.getPath('userData'), 'screenlink.log');
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
-  logStream = fs.createWriteStream(logFile, { flags: 'w' });
+  let big = false;
+  try { big = fs.statSync(logFile).size > 2 * 1024 * 1024; } catch {}
+  logStream = fs.createWriteStream(logFile, { flags: big ? 'w' : 'a' });
+  logStream.write('\n===== Start =====\n');
   launchOptions.logFile = logFile;
 } catch {}
 for (const level of ['log', 'error']) {
@@ -126,49 +140,85 @@ function displayForSource(src) {
 let requestWin = null;
 let requestResolve = null;
 
+let requestTimer = null;
+let requestNotification = null;
+
+// Fragt auf drei Wegen gleichzeitig: eigenes Fenster, Banner im Hauptfenster, Windows-Benachrichtigung.
 function askViaWindow(name, display, timeoutSec) {
   return new Promise((resolve) => {
     closeRequestWindow(false);
     requestResolve = resolve;
-    const w = 460, h = 180;
-    const b = display.workArea;
-    requestWin = new BrowserWindow({
-      x: Math.round(b.x + (b.width - w) / 2),
-      y: Math.round(b.y + (b.height - h) / 2),
-      width: w,
-      height: h,
-      frame: false,
-      transparent: true,
-      resizable: false,
-      skipTaskbar: false,
-      alwaysOnTop: true,
-      show: false,
-      title: 'ScreenLink – Steuerungsanfrage',
-      webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
-    });
-    requestWin.setAlwaysOnTop(true, 'screen-saver');
-    requestWin.setContentProtection(true);
-    requestWin.loadFile(path.join(__dirname, 'request.html'), { query: { name, timeout: String(timeoutSec) } });
-    requestWin.once('ready-to-show', () => {
-      if (!requestWin) return;
-      requestWin.show();
+    const tag = `[${profile || 'main'}]`;
+
+    // 1) Hauptfenster nach vorn holen und Banner anzeigen
+    if (win && !win.isDestroyed()) {
+      try {
+        if (win.isMinimized()) win.restore();
+        win.show();
+        win.setAlwaysOnTop(true, 'screen-saver');
+        win.focus();
+        win.moveTop();
+        setTimeout(() => { if (win && !win.isDestroyed()) win.setAlwaysOnTop(false); }, 1500);
+        win.flashFrame(true);
+        win.webContents.send('control-request-ui', { name, timeout: timeoutSec });
+      } catch (e) { console.error('Hauptfenster', e); }
+    }
+
+    // 2) Eigenes Anfrage-Fenster (undurchsichtig, sofort sichtbar – kein Warten auf ready-to-show)
+    try {
+      const w = 460, h = 180;
+      const b = display.workArea;
+      requestWin = new BrowserWindow({
+        x: Math.round(b.x + (b.width - w) / 2),
+        y: Math.round(b.y + (b.height - h) / 2),
+        width: w,
+        height: h,
+        frame: false,
+        resizable: false,
+        minimizable: false,
+        maximizable: false,
+        alwaysOnTop: true,
+        show: true,
+        backgroundColor: '#171a21',
+        title: 'ScreenLink – Steuerungsanfrage',
+        webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
+      });
+      requestWin.setAlwaysOnTop(true, 'screen-saver');
+      requestWin.loadFile(path.join(__dirname, 'request.html'), { query: { name, timeout: String(timeoutSec) } });
       requestWin.focus();
       requestWin.moveTop();
+      const rw = requestWin;
+      rw.on('closed', () => { if (requestWin === rw) { requestWin = null; closeRequestWindow(false); } });
+      console.log(`${tag} Anfrage-Fenster geöffnet bei ${JSON.stringify(rw.getBounds())}, sichtbar: ${rw.isVisible()}`);
       if (launchOptions.selftest && process.argv.includes('--real-ask')) {
-        console.log(`[${profile}] SELFTEST Anfrage-Fenster sichtbar: ${requestWin.isVisible()}, oben: ${requestWin.isAlwaysOnTop()}`);
-        setTimeout(() => requestWin && requestWin.webContents.executeJavaScript("document.getElementById('yes').click()"), 1500);
+        rw.webContents.once('did-finish-load', () => setTimeout(() => !rw.isDestroyed() && rw.webContents.executeJavaScript("document.getElementById('yes').click()"), 1500));
       }
-    });
-    requestWin.on('closed', () => { requestWin = null; closeRequestWindow(false); });
-    setTimeout(() => closeRequestWindow(false), (timeoutSec + 2) * 1000);
+    } catch (e) { console.error('Anfrage-Fenster', e); }
+
+    // 3) Windows-Benachrichtigung
+    try {
+      if (Notification.isSupported()) {
+        requestNotification = new Notification({ title: 'ScreenLink', body: `${name} möchte deinen PC steuern. Klicke hier zum Beantworten.` });
+        requestNotification.on('click', () => { if (win) { win.show(); win.focus(); } if (requestWin && !requestWin.isDestroyed()) requestWin.focus(); });
+        requestNotification.show();
+      }
+    } catch (e) { console.error('Benachrichtigung', e); }
+
+    requestTimer = setTimeout(() => closeRequestWindow(false), (timeoutSec + 2) * 1000);
   });
 }
 
 function closeRequestWindow(answer) {
+  clearTimeout(requestTimer);
+  requestTimer = null;
   const r = requestResolve;
   requestResolve = null;
-  if (requestWin && !requestWin.isDestroyed()) requestWin.destroy();
+  const rw = requestWin;
   requestWin = null;
+  if (rw && !rw.isDestroyed()) rw.destroy();
+  try { if (requestNotification) requestNotification.close(); } catch {}
+  requestNotification = null;
+  if (win && !win.isDestroyed()) { win.flashFrame(false); win.webContents.send('control-request-closed'); }
   if (r) r(answer);
 }
 
@@ -334,6 +384,7 @@ app.whenReady().then(() => {
     try { fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2)); } catch (e) { console.error('settings', e); }
     console.log(`Kompatibilitätsmodus ${on ? 'AN' : 'aus'} – Neustart`);
     const args = process.argv.slice(1).filter((a) => a !== '--compat');
+    try { app.releaseSingleInstanceLock(); } catch {}
     const portable = process.env.PORTABLE_EXECUTABLE_FILE;
     app.relaunch(portable ? { execPath: portable, args: [] } : { args });
     app.exit(0);
@@ -366,7 +417,13 @@ app.whenReady().then(() => {
   });
 
   ipcMain.on('control-answer', (e, ok) => {
-    if (requestWin && e.sender === requestWin.webContents) closeRequestWindow(!!ok);
+    if (!requestResolve) return;
+    const fromRequest = requestWin && !requestWin.isDestroyed() && e.sender === requestWin.webContents;
+    const fromMain = win && !win.isDestroyed() && e.sender === win.webContents;
+    if (fromRequest || fromMain) {
+      console.log(`[${profile || 'main'}] Antwort kam über ${fromRequest ? 'Anfrage-Fenster' : 'Banner im Hauptfenster'}`);
+      closeRequestWindow(!!ok);
+    }
   });
   ipcMain.on('share-info', (_e, info) => {
     if (info && info.w > 0 && info.h > 0) shareSize = { w: Number(info.w), h: Number(info.h) };

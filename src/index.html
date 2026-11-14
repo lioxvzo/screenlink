@@ -94,6 +94,19 @@
     </div>
   </div>
 
+  <div class="modal hidden" id="reqModal">
+    <div class="modal-card req-card">
+      <h2><span id="reqName">Jemand</span> möchte deinen PC steuern</h2>
+      <p class="req-text">Dann können Maus und Tastatur auf dem geteilten Bildschirm benutzt werden.
+        Beenden jederzeit über den roten Balken oben oder Strg+Alt+Shift+S.</p>
+      <div class="req-row">
+        <button id="reqYes" class="primary req-yes">Erlauben</button>
+        <button id="reqNo">Ablehnen</button>
+        <span id="reqTimer" class="req-timer"></span>
+      </div>
+    </div>
+  </div>
+
   <div class="toast hidden" id="toast"></div>
 
   <script src="../node_modules/peerjs/dist/peerjs.min.js"></script>

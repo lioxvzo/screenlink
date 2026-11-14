@@ -136,15 +136,11 @@ function startPeer(attempt = 0) {
     switch (err.type) {
       case 'unavailable-id':
         // Code noch belegt (z. B. App gerade neu gestartet) – kurz warten, sonst neuer Code
+        // Code ist beim Server noch belegt (alte Sitzung) – weiter versuchen, Code NIE wechseln
         peer.destroy();
-        if (attempt < 3) {
-          el.myCode.textContent = '······';
-          setTimeout(() => startPeer(attempt + 1), 4000);
-        } else {
-          myCode = randomCode();
-          store('myCode', myCode);
-          startPeer(0);
-        }
+        el.myCode.textContent = '······';
+        if (attempt === 2) toast('Dein Code ist noch belegt (läuft ScreenLink doppelt?) – versuche weiter …', 6000);
+        setTimeout(() => startPeer(attempt + 1), Math.min(4000 + attempt * 2000, 15000));
         break;
       case 'peer-unavailable':
         toast('Code nicht gefunden – läuft die App beim Kollegen?');
@@ -289,6 +285,21 @@ function endHostControl(notify) {
   if (notify) send({ type: 'control-revoked' });
   log('Steuerung beendet');
 }
+
+let reqTick = null;
+window.api.onControlRequestUi(({ name, timeout }) => {
+  $('reqName').textContent = name;
+  let left = timeout;
+  const upd = () => { $('reqTimer').textContent = `läuft ab in ${left} s`; if (left-- <= 0) clearInterval(reqTick); };
+  clearInterval(reqTick);
+  upd();
+  reqTick = setInterval(upd, 1000);
+  $('reqModal').classList.remove('hidden');
+  log('Anfrage-Banner angezeigt');
+});
+window.api.onControlRequestClosed(() => { clearInterval(reqTick); $('reqModal').classList.add('hidden'); });
+$('reqYes').onclick = () => window.api.answerControl(true);
+$('reqNo').onclick = () => window.api.answerControl(false);
 
 window.api.onControlEndedLocal(() => {
   if (!hostCtrl) return;

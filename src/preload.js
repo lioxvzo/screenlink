@@ -14,5 +14,7 @@ contextBridge.exposeInMainWorld('api', {
   answerControl: (ok) => ipcRenderer.send('control-answer', !!ok),
   setShareInfo: (info) => ipcRenderer.send('share-info', info),
   setCompat: (on) => ipcRenderer.send('set-compat', !!on),
+  onControlRequestUi: (fn) => ipcRenderer.on('control-request-ui', (_e, d) => fn(d)),
+  onControlRequestClosed: (fn) => ipcRenderer.on('control-request-closed', () => fn()),
   cursorPos: () => ipcRenderer.invoke('cursor-pos'),
 });
