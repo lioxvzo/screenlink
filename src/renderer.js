@@ -29,6 +29,7 @@ const el = {
   shareBtn: $('shareBtn'), stopBtn: $('stopBtn'), quality: $('quality'), mode: $('mode'),
   sendAudio: $('sendAudio'), volume: $('volume'), statsBtn: $('statsBtn'), fullscreenBtn: $('fullscreenBtn'),
   picker: $('picker'), pickerClose: $('pickerClose'), sourceGrid: $('sourceGrid'), toast: $('toast'),
+  controlBtn: $('controlBtn'), revokeBtn: $('revokeBtn'), ctrlBadge: $('ctrlBadge'),
 };
 
 // ---------- Zustand ----------
@@ -41,6 +42,8 @@ let inCall = null;        // eingehender Stream vom Kollegen
 let localStream = null;
 let statsVisible = false;
 let opts = {};
+let viewerCtrl = 'off';   // ich steuere den Kollegen: 'off' | 'pending' | 'on'
+let hostCtrl = false;     // der Kollege steuert mich
 
 const log = (...a) => { console.log(...a); window.api.log(...a); };
 
@@ -211,8 +214,194 @@ function handleMessage(msg) {
     case 'bye':
       onDisconnected(`${remoteLabel} hat getrennt`);
       break;
+    // --- Fernsteuerung ---
+    case 'control-request':
+      onControlRequest();
+      break;
+    case 'control-granted':
+      if (viewerCtrl === 'pending' && inCall) setViewerCtrl('on');
+      else send({ type: 'control-release' });
+      break;
+    case 'control-denied': {
+      const why = {
+        window: `${remoteLabel} teilt nur ein Fenster. Steuerung geht nur bei ganzem Bildschirm.`,
+        notsharing: `${remoteLabel} teilt gerade nichts.`,
+        unsupported: 'Steuerung wird auf dem anderen PC nicht unterstützt.',
+      }[msg.reason] || `${remoteLabel} hat die Steuerung abgelehnt.`;
+      setViewerCtrl('off');
+      toast(why, 4000);
+      break;
+    }
+    case 'control-revoked':
+      if (viewerCtrl !== 'off') { setViewerCtrl('off'); toast(`${remoteLabel} hat die Steuerung beendet.`); }
+      break;
+    case 'control-release':
+      endHostControl(false);
+      break;
+    case 'in':
+      if (hostCtrl) window.api.controlInput(msg.e);
+      if (hostCtrl && opts.selftest) selftestHostInput(msg.e);
+      break;
   }
 }
+
+function send(msg) {
+  if (conn && conn.open) conn.send(msg);
+}
+
+// ---------- Fernsteuerung: ich werde gesteuert ----------
+async function onControlRequest() {
+  if (!outCall) return send({ type: 'control-denied', reason: 'notsharing' });
+  const res = await window.api.controlAsk(remoteLabel);
+  if (res === 'granted' && outCall && conn && conn.open) {
+    hostCtrl = true;
+    el.revokeBtn.classList.remove('hidden');
+    send({ type: 'control-granted' });
+    log('Steuerung erlaubt');
+  } else {
+    if (res === 'granted') window.api.controlEnd();
+    send({ type: 'control-denied', reason: res });
+  }
+}
+
+function endHostControl(notify) {
+  if (!hostCtrl) return;
+  hostCtrl = false;
+  window.api.controlEnd();
+  el.revokeBtn.classList.add('hidden');
+  if (notify) send({ type: 'control-revoked' });
+  log('Steuerung beendet');
+}
+
+window.api.onControlEndedLocal(() => {
+  if (!hostCtrl) return;
+  hostCtrl = false;
+  el.revokeBtn.classList.add('hidden');
+  send({ type: 'control-revoked' });
+  toast('Steuerung beendet');
+});
+
+// ---------- Fernsteuerung: ich steuere ----------
+let ctrlTimer = null;
+const viewerKeys = new Set();
+
+function setViewerCtrl(state) {
+  const was = viewerCtrl;
+  viewerCtrl = state;
+  clearTimeout(ctrlTimer);
+  if (was === 'on' && state !== 'on') {
+    sendInput({ t: 'rel' });
+    viewerKeys.clear();
+  }
+  el.stage.classList.toggle('controlling', state === 'on');
+  el.ctrlBadge.classList.toggle('hidden', state !== 'on');
+  el.controlBtn.classList.toggle('hidden', !inCall);
+  el.controlBtn.disabled = state === 'pending';
+  el.controlBtn.classList.toggle('active-ctrl', state === 'on');
+  el.controlBtn.textContent = { off: 'Steuerung anfragen', pending: 'Angefragt …', on: 'Steuerung abgeben' }[state];
+  if (state === 'on') {
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    toast(`Du steuerst jetzt den PC von ${remoteLabel}`);
+    if (opts.selftest) selftestViewerControl();
+  }
+}
+
+function requestControl() {
+  if (viewerCtrl === 'on') {
+    send({ type: 'control-release' });
+    setViewerCtrl('off');
+    return;
+  }
+  if (viewerCtrl === 'pending' || !inCall) return;
+  send({ type: 'control-request' });
+  setViewerCtrl('pending');
+  ctrlTimer = setTimeout(() => {
+    if (viewerCtrl === 'pending') { setViewerCtrl('off'); toast('Keine Antwort auf die Anfrage.'); }
+  }, 35000);
+}
+
+function sendInput(e) {
+  send({ type: 'in', e });
+}
+
+// Position im Video (object-fit: contain) → 0..1 relativ zum geteilten Bildschirm
+function normPos(ev) {
+  const v = el.remoteVideo;
+  const r = v.getBoundingClientRect();
+  const vw = v.videoWidth, vh = v.videoHeight;
+  if (!vw || !vh) return null;
+  const scale = Math.min(r.width / vw, r.height / vh);
+  const w = vw * scale, h = vh * scale;
+  const x = (ev.clientX - r.left - (r.width - w) / 2) / w;
+  const y = (ev.clientY - r.top - (r.height - h) / 2) / h;
+  return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)), inside: x >= 0 && x <= 1 && y >= 0 && y <= 1 };
+}
+
+let pendingMove = null;
+let moveScheduled = false;
+function queueMove(p) {
+  pendingMove = p;
+  if (moveScheduled) return;
+  moveScheduled = true;
+  requestAnimationFrame(() => {
+    moveScheduled = false;
+    if (pendingMove && viewerCtrl === 'on') sendInput({ t: 'mm', x: +pendingMove.x.toFixed(5), y: +pendingMove.y.toFixed(5) });
+    pendingMove = null;
+  });
+}
+
+el.remoteVideo.addEventListener('pointermove', (ev) => {
+  if (viewerCtrl !== 'on') return;
+  const p = normPos(ev);
+  if (p && (p.inside || el.remoteVideo.hasPointerCapture(ev.pointerId))) queueMove(p);
+});
+el.remoteVideo.addEventListener('pointerdown', (ev) => {
+  if (viewerCtrl !== 'on') return;
+  const p = normPos(ev);
+  if (!p || !p.inside) return;
+  ev.preventDefault();
+  el.remoteVideo.setPointerCapture(ev.pointerId);
+  sendInput({ t: 'mm', x: p.x, y: p.y });
+  sendInput({ t: 'md', b: ev.button });
+});
+el.remoteVideo.addEventListener('pointerup', (ev) => {
+  if (viewerCtrl !== 'on') return;
+  ev.preventDefault();
+  const p = normPos(ev);
+  if (p) sendInput({ t: 'mm', x: p.x, y: p.y });
+  sendInput({ t: 'mu', b: ev.button });
+});
+el.remoteVideo.addEventListener('wheel', (ev) => {
+  if (viewerCtrl !== 'on') return;
+  ev.preventDefault();
+  const f = ev.deltaMode === 1 ? 40 : ev.deltaMode === 2 ? 800 : 1.2; // 100 px ≈ 1 Raste (120)
+  sendInput({ t: 'wh', dy: Math.round(-ev.deltaY * f), dx: Math.round(ev.deltaX * f) });
+}, { passive: false });
+el.remoteVideo.addEventListener('contextmenu', (ev) => { if (viewerCtrl === 'on') ev.preventDefault(); });
+el.remoteVideo.addEventListener('auxclick', (ev) => { if (viewerCtrl === 'on') ev.preventDefault(); });
+
+function typingLocally() {
+  const a = document.activeElement;
+  return a && (a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.tagName === 'TEXTAREA');
+}
+window.addEventListener('keydown', (ev) => {
+  if (viewerCtrl !== 'on' || typingLocally() || !el.picker.classList.contains('hidden')) return;
+  if (ev.code === 'F11') return;
+  ev.preventDefault();
+  ev.stopImmediatePropagation();
+  viewerKeys.add(ev.code);
+  sendInput({ t: 'kd', c: ev.code });
+}, true);
+window.addEventListener('keyup', (ev) => {
+  if (viewerCtrl !== 'on' || !viewerKeys.has(ev.code)) return;
+  ev.preventDefault();
+  ev.stopImmediatePropagation();
+  viewerKeys.delete(ev.code);
+  sendInput({ t: 'ku', c: ev.code });
+}, true);
+window.addEventListener('blur', () => {
+  if (viewerCtrl === 'on' && viewerKeys.size) { sendInput({ t: 'rel' }); viewerKeys.clear(); }
+});
 
 function onConnected() {
   log('verbunden mit', conn.peer);
@@ -237,6 +426,7 @@ function onDisconnected(reason) {
   const c = conn;
   conn = null;
   try { c && c.close(); } catch {}
+  endHostControl(false);
   stopSharing(false);
   closeIncoming();
   el.connectBox.classList.remove('hidden');
@@ -378,6 +568,7 @@ async function applySenderParams() {
 }
 
 function stopSharing(notify) {
+  endHostControl(notify);
   if (notify && conn && conn.open) conn.send({ type: 'share-stop' });
   const call = outCall;
   outCall = null;
@@ -403,7 +594,9 @@ function onIncomingCall(call) {
     el.remoteVideo.volume = Number(el.volume.value);
     el.remoteVideo.play().catch((e) => log('play', e.message));
     el.placeholder.classList.add('hidden');
+    setViewerCtrl('off');
     if (opts.selftest) setTimeout(() => selftestReport(call), 6000);
+    if (opts.autoControl) setTimeout(requestControl, 9000);
   });
   call.peerConnection.addEventListener('connectionstatechange', () => {
     const s = call.peerConnection.connectionState;
@@ -417,6 +610,8 @@ function closeIncoming() {
   const call = inCall;
   inCall = null;
   if (call) { try { call.close(); } catch {} }
+  if (viewerCtrl !== 'off') send({ type: 'control-release' });
+  setViewerCtrl('off');
   el.remoteVideo.srcObject = null;
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   setIdleText();
@@ -490,6 +685,21 @@ async function selftestReport(call) {
   log('SELFTEST-RECV', JSON.stringify({ ...s, audioTracks: el.remoteVideo.srcObject?.getAudioTracks().length }));
 }
 
+// Zuschauer: Maus in die Mitte, dann ein harmloser Shift-Tastendruck, dann abgeben
+function selftestViewerControl() {
+  log('SELFTEST-CTRL granted');
+  setTimeout(() => sendInput({ t: 'mm', x: 0.5, y: 0.5 }), 500);
+  setTimeout(() => { sendInput({ t: 'kd', c: 'ShiftLeft' }); sendInput({ t: 'ku', c: 'ShiftLeft' }); }, 1000);
+  setTimeout(() => requestControl(), 2500); // = abgeben
+}
+
+let selftestLogged = false;
+async function selftestHostInput(e) {
+  if (e.t !== 'mm' || selftestLogged) return;
+  selftestLogged = true;
+  setTimeout(async () => log('SELFTEST-CURSOR', JSON.stringify(await window.api.cursorPos()), 'für', JSON.stringify(e)), 200);
+}
+
 // ---------- UI-Verdrahtung ----------
 el.connectBtn.onclick = () => connectTo(el.remoteCode.value);
 el.remoteCode.addEventListener('keydown', (e) => { if (e.key === 'Enter') connectTo(el.remoteCode.value); });
@@ -511,6 +721,8 @@ el.shareBtn.onclick = async () => {
   if (id) startSharing(id);
 };
 el.stopBtn.onclick = () => stopSharing(true);
+el.controlBtn.onclick = requestControl;
+el.revokeBtn.onclick = () => { endHostControl(true); toast('Steuerung entzogen'); };
 el.quality.onchange = () => { store('quality', el.quality.value); applySenderParams(); };
 el.mode.onchange = () => { store('mode', el.mode.value); applySenderParams(); };
 el.sendAudio.onchange = () => store('sendAudio', el.sendAudio.checked ? '1' : '0');
@@ -521,7 +733,7 @@ const toggleFullscreen = () => {
   else el.stage.requestFullscreen().catch(() => {});
 };
 el.fullscreenBtn.onclick = toggleFullscreen;
-el.remoteVideo.ondblclick = toggleFullscreen;
+el.remoteVideo.ondblclick = () => { if (viewerCtrl !== 'on') toggleFullscreen(); };
 document.addEventListener('keydown', (e) => {
   if (e.key === 'F11') { e.preventDefault(); toggleFullscreen(); }
   if (e.key === 'Escape' && !el.picker.classList.contains('hidden')) closePicker(null);

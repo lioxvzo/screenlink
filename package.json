@@ -1,6 +1,6 @@
 {
   "name": "screenlink",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Bildschirmübertragung mit Ton zwischen zwei PCs",
   "main": "src/main.js",
   "author": "",
@@ -25,9 +25,13 @@
     },
     "portable": {
       "artifactName": "ScreenLink.exe"
-    }
+    },
+    "asarUnpack": [
+      "**/*.node"
+    ]
   },
   "dependencies": {
+    "koffi": "^3.3.8",
     "peerjs": "^1.5.5"
   },
   "devDependencies": {

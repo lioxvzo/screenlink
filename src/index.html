@@ -40,6 +40,7 @@
       <div class="small" id="placeholderText">Gib den Code deines Kollegen ein oder schick ihm deinen.</div>
     </div>
     <div class="stats hidden" id="stats"></div>
+    <div class="ctrl-badge hidden" id="ctrlBadge">Du steuerst · Maus und Tastatur gehen an den Kollegen</div>
     <div class="preview hidden" id="previewBox">
       <video id="localVideo" autoplay playsinline muted></video>
       <span>Du teilst gerade</span>
@@ -49,6 +50,8 @@
   <footer class="controls">
     <button id="shareBtn" class="primary" disabled>Bildschirm teilen</button>
     <button id="stopBtn" class="danger hidden">Teilen beenden</button>
+    <button id="controlBtn" class="hidden" title="Maus und Tastatur des Kollegen steuern">Steuerung anfragen</button>
+    <button id="revokeBtn" class="danger hidden" title="Strg+Alt+Shift+S">Steuerung entziehen</button>
 
     <label class="field">Qualität
       <select id="quality">

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+  <style>
+    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; font: 13px "Segoe UI", system-ui, sans-serif; user-select: none; }
+    .bar {
+      height: 100%; box-sizing: border-box; display: flex; align-items: center; gap: 12px;
+      padding: 0 8px 0 16px; background: #da373c; color: #fff; border-radius: 10px;
+    }
+    .txt { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .hint { opacity: .8; font-size: 12px; }
+    button { font: inherit; border: 0; border-radius: 6px; padding: 6px 12px; background: #fff; color: #da373c; font-weight: 600; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="bar">
+    <div class="txt"><b id="who">Jemand</b> steuert deinen PC <span class="hint">· Strg+Alt+Shift+S</span></div>
+    <button id="stop">Beenden</button>
+  </div>
+  <script>
+    const name = new URLSearchParams(location.search).get('name') || 'Jemand';
+    document.getElementById('who').textContent = name;
+    document.getElementById('stop').onclick = () => window.api.stopControlFromOverlay();
+  </script>
+</body>
+</html>

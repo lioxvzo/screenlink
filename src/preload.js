@@ -5,4 +5,11 @@ contextBridge.exposeInMainWorld('api', {
   selectSource: (id) => ipcRenderer.invoke('select-source', id),
   launchOptions: () => ipcRenderer.invoke('launch-options'),
   log: (...parts) => ipcRenderer.send('log', parts.map(String).join(' ')),
+  // Fernsteuerung
+  controlAsk: (name) => ipcRenderer.invoke('control-ask', name),
+  controlEnd: () => ipcRenderer.send('control-end'),
+  controlInput: (ev) => ipcRenderer.send('control-input', ev),
+  onControlEndedLocal: (fn) => ipcRenderer.on('control-ended-local', () => fn()),
+  stopControlFromOverlay: () => ipcRenderer.send('control-stop-local'),
+  cursorPos: () => ipcRenderer.invoke('cursor-pos'),
 });
